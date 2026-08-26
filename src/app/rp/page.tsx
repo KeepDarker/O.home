@@ -5,7 +5,7 @@ import {
   SendOutlined, LockOutlined, UnlockOutlined
 } from '@ant-design/icons';
 import {
-  addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc,
+  addDoc, collection, doc, onSnapshot, query, serverTimestamp, updateDoc,
   where, deleteDoc
 } from 'firebase/firestore';
 import { db } from '../firebase';
@@ -20,13 +20,13 @@ export interface RpCharacter {
   avatarUrl?: string;
   memo?: string;
   grants?: string[];
-  own?: string;
+  own?: string; // 사이트 내부 user.id 저장
   createdAt?: any;
 }
 
 export interface RpWindowProps {
   room: { id: string; title: string; hostId: string; members?: string[] };
-  user: { id: string; nickname?: string };
+  user: { id: string; nickname?: string }; // 사이트 내부 유저 정보
   isAdmin: boolean;
 }
 
@@ -37,7 +37,7 @@ interface RpMsg {
   roomId: string;
   kind: MsgKind;
   text: string;
-  authorId: string;
+  authorId: string; // 사이트 내부 user.id
   authorName: string;
   charId?: string;
   charName?: string;
@@ -59,6 +59,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
   const [rawMsgs, setRawMsgs] = useState<RpMsg[]>([]);
   const [loadingMsgs, setLoadingMsgs] = useState(true);
 
+  // 현재 활성화된 캐릭터 탭 (null이면 전체/플레이어 탭)
   const [activeCharId, setActiveCharId] = useState<string | null>(null);
 
   const [kind, setKind] = useState<MsgKind>('player');
@@ -84,7 +85,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // 캐릭터 구독
+  // 캐릭터 목록 수신
   useEffect(() => {
     if (!room?.id) return;
     setLoadingChars(true);
@@ -106,7 +107,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
     return () => unsub();
   }, [room?.id]);
 
-  // 메시지 구독 (클라이언트 정렬로 Firestore 복합 인덱스 요구 차단)
+  // 메시지 목록 수신 (클라이언트 측 정렬)
   useEffect(() => {
     if (!room?.id) return;
     setLoadingMsgs(true);
@@ -138,46 +139,49 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
     return map;
   }, [chars]);
 
-  const charGrant = (c: RpCharacter, uid: string) => {
-    if (c.own === uid) return 'own';
-    if (c.grants?.includes(uid)) return 'grant';
-    return null;
-  };
-
+  // 사이트 내부 user.id 기준 캐릭터 조종 권한 체크
   const myChars = useMemo(() => {
-    return chars.filter((c) => isAdmin || c.own === user.id || c.grants?.includes(user.id));
+    if (isAdmin) return chars;
+    return chars.filter(
+      (c) => c.own === user.id || (Array.isArray(c.grants) && c.grants.includes(user.id))
+    );
   }, [chars, isAdmin, user.id]);
 
-  useEffect(() => {
-    if (myChars.length > 0) {
-      if (activeCharId && !myChars.some((c) => c.id === activeCharId)) {
-        setActiveCharId(myChars[0].id);
-      }
+  // 탭 전환 시 폼 선택 캐릭터도 연동
+  const handleSelectTab = (cId: string | null) => {
+    setActiveCharId(cId);
+    if (cId) {
+      setCharId(cId);
+      setKind('char');
+    } else {
+      setKind('player');
     }
-  }, [myChars, activeCharId]);
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [rawMsgs.length, activeCharId]);
 
-  const sel = activeCharId;
-
-  // 탭 변경 및 권한에 따른 메시지 필터링
+  // 비밀글/귓속말 가시성 및 탭 필터링 (사이트 내부 user.id 기준)
   const msgsOf = (cId: string | null): RpMsg[] => {
     return rawMsgs.filter((m) => {
-      // 선택된 캐릭터 탭 필터링 (특정 캐릭터 탭일 때는 해당 캐릭터 관련 대사/귓속말 위주)
+      // 1. 특정 캐릭터 탭에서는 해당 캐릭터 대사나 해당 캐릭터 대상 귓속말만 필터
       if (cId && m.kind === 'char' && m.charId !== cId && !m.targetCharIds?.includes(cId)) {
         return false;
       }
 
-      // 비밀글/귓속말 가시성 권한 확인
+      // 2. 귓속말(isSecret) 표시 권한 계산 (사이트 내부 ID 사용)
       if (m.isSecret) {
-        const isAuthorOrAdmin = m.authorId === user.id || isAdmin || room.hostId === user.id;
-        // 내가 소유/조종하는 캐릭터 목록 중 수신 타깃이 있는지 확인
+        const isAuthor = m.authorId === user.id;
+        const isRoomAdmin = isAdmin || room.hostId === user.id;
+        
+        // 내 조종 대상 캐릭터 ID 목록
         const myCharIds = myChars.map((c) => c.id);
-        const isTargetChar = m.targetCharIds?.some((id) => myCharIds.includes(id));
+        const isTarget = m.targetCharIds?.some((id) => myCharIds.includes(id));
 
-        if (!isAuthorOrAdmin && !isTargetChar) return false;
+        if (!isAuthor && !isRoomAdmin && !isTarget) {
+          return false;
+        }
       }
       return true;
     });
@@ -186,23 +190,21 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
   const handleSend = async () => {
     if (!text.trim() && kind !== 'dice') return;
     try {
-      let cObj = charId ? charMap.get(charId) : undefined;
-      if (kind === 'char' && !cObj && sel) {
-        cObj = charMap.get(sel);
-      }
+      const selectedCharId = charId || activeCharId || undefined;
+      let cObj = selectedCharId ? charMap.get(selectedCharId) : undefined;
 
       let payload: Partial<RpMsg> = {
         roomId: room.id,
         kind,
         text: text.trim(),
-        authorId: user.id,
-        authorName: user.nickname || 'Unknown',
+        authorId: user.id, // 사이트 내부 ID
+        authorName: user.nickname || '익명',
         createdAt: serverTimestamp(),
       };
 
       if (kind === 'char') {
         if (!cObj) {
-          antMessage.warning('대사할 캐릭터를 선택하세요.');
+          antMessage.warning('대사할 캐릭터를 선택해주세요.');
           return;
         }
         payload.charId = cObj.id;
@@ -214,7 +216,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
 
       if (isSecret) {
         if (targetCharIds.length === 0) {
-          antMessage.warning('귓속말을 보낼 대상 캐릭터를 선택하세요.');
+          antMessage.warning('귓속말을 받을 대상 캐릭터를 하나 이상 선택하세요.');
           return;
         }
         payload.isSecret = true;
@@ -240,14 +242,14 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
       if (kind === 'dice') setKind('player');
     } catch (e) {
       console.error(e);
-      antMessage.error('메시지 전송 실패');
+      antMessage.error('메시지 전송에 실패했습니다.');
     }
   };
 
   const handleDeleteMsg = async (id: string) => {
     try {
       await deleteDoc(doc(db, 'rp_messages', id));
-      antMessage.success('메시지 삭제 완료');
+      antMessage.success('메시지가 삭제되었습니다.');
     } catch (e) {
       antMessage.error('삭제 실패');
     }
@@ -262,7 +264,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
       });
       setEditMsgId(null);
       setEditText('');
-      antMessage.success('메시지 수정 완료');
+      antMessage.success('메시지가 수정되었습니다.');
     } catch (e) {
       antMessage.error('수정 실패');
     }
@@ -275,7 +277,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
       setCColor(c.color || '#3b82f6');
       setCAvatar(c.avatarUrl || '');
       setCMemo(c.memo || '');
-      setCOwn(c.own || '');
+      setCOwn(c.own || user.id);
       setCGrants(c.grants || []);
     } else {
       setCEditId(null);
@@ -283,7 +285,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
       setCColor('#3b82f6');
       setCAvatar('');
       setCMemo('');
-      setCOwn(user.id);
+      setCOwn(user.id); // 사이트 내부 ID 기본 적용
       setCGrants([]);
     }
     setCModal(true);
@@ -301,7 +303,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         color: cColor,
         avatarUrl: cAvatar.trim() || DEFAULT_AVATAR,
         memo: cMemo.trim(),
-        own: cOwn || user.id,
+        own: cOwn || user.id, // 전달받은 사이트 내부 ID 적용
         grants: cGrants,
         updatedAt: serverTimestamp(),
       };
@@ -315,7 +317,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         });
       }
       setCModal(false);
-      antMessage.success('캐릭터 저장 완료');
+      antMessage.success('캐릭터 정보가 저장되었습니다.');
     } catch (e) {
       antMessage.error('저장 실패');
     }
@@ -325,30 +327,30 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
     try {
       await deleteDoc(doc(db, 'rp_characters', id));
       if (activeCharId === id) setActiveCharId(null);
-      antMessage.success('캐릭터 삭제 완료');
+      antMessage.success('캐릭터가 삭제되었습니다.');
     } catch (e) {
       antMessage.error('삭제 실패');
     }
   };
 
-  const activeChar = sel ? charMap.get(sel) : null;
+  const activeChar = activeCharId ? charMap.get(activeCharId) : null;
 
   return (
     <div className="rp-window-container">
       {/* 탭 헤더 */}
       <div className="rp-tabs">
         <button
-          className={`rp-tab-item ${sel === null ? 'active' : ''}`}
-          onClick={() => setActiveCharId(null)}
+          className={`rp-tab-item ${activeCharId === null ? 'active' : ''}`}
+          onClick={() => handleSelectTab(null)}
         >
-          <UserOutlined /> 전체 관람 / 플레이어
+          <UserOutlined /> 전체 / 플레이어
         </button>
         {myChars.map((c) => (
           <button
             key={c.id}
-            className={`rp-tab-item ${sel === c.id ? 'active' : ''}`}
-            onClick={() => setActiveCharId(c.id)}
-            style={{ borderBottomColor: sel === c.id ? c.color : 'transparent' }}
+            className={`rp-tab-item ${activeCharId === c.id ? 'active' : ''}`}
+            onClick={() => handleSelectTab(c.id)}
+            style={{ borderBottomColor: activeCharId === c.id ? c.color : 'transparent' }}
           >
             <span className="rp-tab-color" style={{ backgroundColor: c.color || '#3b82f6' }} />
             {c.name}
@@ -361,7 +363,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         )}
       </div>
 
-      {/* 액티브 캐릭터 정보 바 */}
+      {/* 활성화된 캐릭터 상단 바 */}
       {activeChar && (
         <div className="rp-char-bar" style={{ borderLeftColor: activeChar.color || '#3b82f6' }}>
           <img className="rp-char-avatar" src={activeChar.avatarUrl || DEFAULT_AVATAR} alt="" />
@@ -369,7 +371,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
             <div className="rp-char-name">
               {activeChar.name}
               <Tag color="blue" style={{ marginLeft: 8 }}>
-                {charGrant(activeChar, user.id) === 'own' ? '소유자' : '권한부여됨'}
+                {activeChar.own === user.id ? '소유자' : '조종 권한'}
               </Tag>
             </div>
             {activeChar.memo && <div className="rp-char-memo">{activeChar.memo}</div>}
@@ -388,14 +390,14 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         </div>
       )}
 
-      {/* 메시지 출력 영역 */}
+      {/* 메시지 영역 */}
       <div className="rp-msgs">
         {loadingMsgs || loadingChars ? (
           <div className="rp-center"><Spin /></div>
-        ) : msgsOf(sel).length === 0 ? (
-          <div className="rp-empty">메시지가 없습니다.</div>
+        ) : msgsOf(activeCharId).length === 0 ? (
+          <div className="rp-empty">대화 내역이 없습니다.</div>
         ) : (
-          msgsOf(sel).map((m) => {
+          msgsOf(activeCharId).map((m) => {
             const isMine = m.authorId === user.id;
             const isEdit = editMsgId === m.id;
 
@@ -404,7 +406,6 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                 key={m.id}
                 className={`rp-msg-row ${m.kind} ${isMine ? 'me' : 'other'} ${m.isSecret ? 'secret' : ''}`}
               >
-                {/* 상대방 메시지 아바타 (왼쪽) */}
                 {!isMine && (
                   <div className="rp-msg-avatar-wrap">
                     {m.kind === 'char' ? (
@@ -416,7 +417,6 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                 )}
 
                 <div className="rp-msg-content">
-                  {/* 상단 헤더 (이름 & 비밀글 태그) */}
                   <div className="rp-msg-header">
                     {m.kind === 'char' ? (
                       <span className="rp-msg-charname" style={{ color: m.charColor || '#3b82f6' }}>
@@ -433,7 +433,6 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                     )}
                   </div>
 
-                  {/* 메시지 말풍선 본문 */}
                   {isEdit ? (
                     <div className="rp-msg-edit-box">
                       <Input.TextArea
@@ -452,7 +451,6 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                     </div>
                   )}
 
-                  {/* 호버 액션 버튼 (수정/삭제) */}
                   {(m.authorId === user.id || isAdmin) && !isEdit && (
                     <div className="rp-msg-hover-actions">
                       <Button icon={<EditOutlined />} type="text" size="small" onClick={() => { setEditMsgId(m.id); setEditText(m.text); }} />
@@ -461,7 +459,6 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                   )}
                 </div>
 
-                {/* 내 메시지 아바타 (오른쪽) */}
                 {isMine && (
                   <div className="rp-msg-avatar-wrap">
                     {m.kind === 'char' ? (
@@ -478,7 +475,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         <div ref={bottomRef} />
       </div>
 
-      {/* 입력 컨트롤 바 */}
+      {/* 하단 입력 폼 */}
       <div className="rp-input-panel">
         <div className="rp-input-options">
           <Select
@@ -495,8 +492,8 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
 
           {kind === 'char' && (
             <Select
-              placeholder="캐릭터 선택"
-              value={charId || sel || undefined}
+              placeholder="발신 캐릭터"
+              value={charId || activeCharId || undefined}
               onChange={(v) => setCharId(v)}
               style={{ width: 140 }}
               options={myChars.map((c) => ({ value: c.id, label: c.name }))}
@@ -527,7 +524,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
             </Space>
           )}
 
-          <Tooltip title="특정 캐릭터에게만 보이는 귓속말">
+          <Tooltip title="지정한 캐릭터 권한 소유자에게만 비공개">
             <Button
               type={isSecret ? 'primary' : 'default'}
               danger={isSecret}
@@ -541,7 +538,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
           {isSecret && (
             <Select
               mode="multiple"
-              placeholder="수신 캐릭터 선택"
+              placeholder="수신 대상 캐릭터"
               value={targetCharIds}
               onChange={(v) => setTargetCharIds(v)}
               style={{ minWidth: 160, flex: 1 }}
@@ -560,7 +557,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                   ? '나레이션 내용을 입력하세요...'
                   : kind === 'char'
                   ? '캐릭터 대사를 입력하세요...'
-                  : '플레이어 메시지를 입력하세요...'
+                  : '플레이어 대화를 입력하세요...'
               }
               autoSize={{ minRows: 1, maxRows: 4 }}
               onKeyDown={(e) => {
@@ -583,9 +580,9 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         )}
       </div>
 
-      {/* 캐릭터 생성/수정 모달 */}
+      {/* 캐릭터 관리 모달 */}
       <Modal
-        title={cEditId ? '캐릭터 수정' : '캐릭터 생성'}
+        title={cEditId ? '캐릭터 수정' : '캐릭터 추가'}
         open={cModal}
         onOk={handleSaveChar}
         onCancel={() => setCModal(false)}
@@ -599,7 +596,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
           </div>
 
           <div>
-            <label>테마 색상</label>
+            <label>대표 색상</label>
             <Input type="color" value={cColor} onChange={(e) => setCColor(e.target.value)} />
           </div>
 
@@ -609,21 +606,21 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
           </div>
 
           <div>
-            <label>메모 / 소개</label>
+            <label>메모 / 설정</label>
             <Input.TextArea value={cMemo} onChange={(e) => setCMemo(e.target.value)} rows={3} />
           </div>
 
           <div>
-            <label>소유자 UID (기본값: 생성자)</label>
-            <Input value={cOwn} onChange={(e) => setCOwn(e.target.value)} />
+            <label>소유자 사이트 ID (`user.id`)</label>
+            <Input value={cOwn} onChange={(e) => setCOwn(e.target.value)} placeholder="예: user_123" />
           </div>
 
           <div>
-            <label>조종 권한 부여 (UID 컴마 구분)</label>
+            <label>조종 권한 부여 (사이트 ID, 쉼표 구분)</label>
             <Input
               value={cGrants.join(', ')}
               onChange={(e) => setCGrants(e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-              placeholder="uid1, uid2"
+              placeholder="user_123, user_456"
             />
           </div>
         </div>
