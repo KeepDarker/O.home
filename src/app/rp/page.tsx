@@ -1,577 +1,633 @@
-﻿'use client';
-// 역극 (4.9) — 실시간 채팅형. 방 개설(자관 기반/자유) · 참여자에게만 존재 노출 ·
-// 캐릭터 선택 발화(테마색 말풍선) · 지문(/desc) · 메시지 수정/삭제 · 완결/공개 전환 · HTML 내보내기
-// ※ 실시간 송수신·입력 중 표시·참여자 전원 동의는 Supabase Realtime 연동 시 활성화 (현재 localStorage)
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useAuth } from '@/lib/auth';
-import { useLocalList, newId } from '@/lib/postStore';
+import { Button, Input, Modal, Select, Spin, Tag, Tooltip, message as antMessage, Space } from 'antd';
 import {
-  RpRoom, RpMessage, RP_SEED, hexRgb, rpLastDate, rpHasNew,
-  RpMessageRow, RP_MSG_KEY, RP_MSG_SEED, messagesFor, rpMarkRead, rpMemberIds,
-} from '@/lib/rpStore';
-import { Character, CHAR_SEED, Relation, REL_SEED, charGrant } from '@/lib/charStore';
-import { Modal, ConfirmModal, useConfirmDelete } from '@/components/ui/Modal';
-import { KInput, KTextarea, KSelect, KCheck } from '@/components/ui/Kit';
-import { CroppedBlobImg } from '@/components/ui/CropEditor';
-import { EditableDesc, PageTitle } from '@/components/ui/PageText';
-import { useToast } from '@/components/ui/Toast';
+  UserOutlined, PlusOutlined, DeleteOutlined, EditOutlined,
+  SendOutlined, LockOutlined, UnlockOutlined
+} from '@ant-design/icons';
+import {
+  addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc,
+  where, deleteDoc
+} from 'firebase/firestore';
+import { db } from '../firebase';
+import './RpWindow.css';
 
-/** 캐릭터 얼굴 칩 (썸네일 or 데모 플레이스홀더) */
-function Face({ ch, className }: { ch?: Character; className: string }) {
-  return (
-    <div className={`${className} ${!ch?.thumbId ? `ph ${ch?.thumbClass ?? ''}` : ''}`}>
-      {ch?.thumbId && <CroppedBlobImg fileRef={ch.thumbId} crop={ch.thumbCrop} />}
-    </div>
-  );
+// --- Types ---
+export interface RpCharacter {
+  id: string;
+  roomId: string;
+  name: string;
+  color?: string;
+  avatarUrl?: string;
+  memo?: string;
+  grants?: string[];
+  own?: string;
+  createdAt?: any;
 }
 
-const fmtHM = (iso: string) => {
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-};
+export interface RpWindowProps {
+  room: { id: string; title: string; hostId: string; members?: string[] };
+  user: { id: string; nickname?: string };
+  isAdmin: boolean;
+}
 
-import { useMembers } from '@/lib/members';
-import { pushNotif } from '@/lib/notifStore';
+type MsgKind = 'player' | 'char' | 'narration' | 'dice';
 
-export default function RpPage() {
-  const { user, isAdmin } = useAuth();
-  const toast = useToast();
-  const del = useConfirmDelete();
-  const [rooms, setRooms, loaded] = useLocalList<RpRoom>('ohome.rp.v1', RP_SEED);
-  // 발화는 방과 따로 저장한다 (v2.0) — 방 안에 두면 말할 때마다 방을 UPDATE 해야 해서
-  // 남이 만든 방에서는 참여자가 발화할 수 없었다 (댓글·문답과 같은 뿌리)
-  const [msgRows, setMsgRows] = useLocalList<RpMessageRow>(RP_MSG_KEY, RP_MSG_SEED);
-  // 방 하나의 발화 — 옛 방 안의 것 + 분리 저장분
-  const msgsOf = (r: RpRoom) => messagesFor(msgRows, r.id, r.messages);
-  // 참여 회원 — 기반 자관이 있으면 그 자관 캐릭터의 권한자에서 자동으로 (v2.0 사용자 확정).
-  // 계산해서 쓰므로 권한이 다른 사람에게 넘어가면 그 자관 기반 역극 전체에 바로 반영된다
-  const memberIdsOf = (r: RpRoom) => rpMemberIds(r, rels, chars);
-  const [chars] = useLocalList<Character>('ohome.chars.v1', CHAR_SEED);
-  const [rels] = useLocalList<Relation>('ohome.rels.v1', REL_SEED);
-  const [selId, setSelId] = useState<string | null>(null);
-  const [fStatus, setFStatus] = useState<'all' | 'ongoing' | 'done'>('ongoing'); // 우측 상태 필터 — 진행중이 기본
-  // 모바일 (v1.9 사용자 확정) — 방 목록은 위에 접힌 바로, 입력창 포커스 중엔 역극 영역만 표시
-  const [mListOpen, setMListOpen] = useState(false);
-  const [mFocus, setMFocus] = useState(false);
+interface RpMsg {
+  id: string;
+  roomId: string;
+  kind: MsgKind;
+  text: string;
+  authorId: string;
+  authorName: string;
+  charId?: string;
+  charName?: string;
+  charColor?: string;
+  charAvatar?: string;
+  targetCharIds?: string[];
+  charOwn?: string;
+  isSecret?: boolean;
+  diceDetail?: string;
+  createdAt?: any;
+}
 
-  // 참여자에게만 존재 노출 (확정 — 관리자도 비참여 방은 보지 않음)
-  const allMine = useMemo(() => (user
-    ? rooms.filter(r => memberIdsOf(r).includes(user.id))
-      .sort((a, b) => rpLastDate(b, messagesFor(msgRows, b.id, b.messages))
-        .localeCompare(rpLastDate(a, messagesFor(msgRows, a.id, a.messages))))
-    : []), [rooms, user, msgRows, rels, chars]);
-  const myRooms = useMemo(() => allMine.filter(r => fStatus === 'all' || r.status === fStatus), [allMine, fStatus]);
-  const sel = myRooms.find(r => r.id === selId) ?? myRooms[0];
-  const cntS = (s: 'all' | 'ongoing' | 'done') =>
-    allMine.filter(r => s === 'all' || r.status === s).length;
+const DEFAULT_AVATAR = 'https://api.dicebear.com/7.x/bottts/svg?seed=rp-default';
 
-  // 발화자 선택 — 관리자는 기반 자관 멤버 전부(+자유 개설이면 자캐 전부),
-  // 회원은 권한(grants — 역극 플레이/편집)이 부여된 캐릭터만 (3차 회원-캐릭터 연결, v1.9)
-  const rel = rels.find(r => r.id === sel?.relId);
-  const speakChars = useMemo(() => {
-    if (rel) {
-      const members = rel.members.map(m => chars.find(c => c.id === m.charId)).filter(Boolean) as Character[];
-      return isAdmin ? members : members.filter(c => !!charGrant(c, user?.id));
-    }
-    return isAdmin ? chars.filter(c => c.own) : chars.filter(c => !!charGrant(c, user?.id));
-  }, [rel, chars, isAdmin, user?.id]);
+export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
+  const [chars, setChars] = useState<RpCharacter[]>([]);
+  const [loadingChars, setLoadingChars] = useState(true);
 
-  const [speaker, setSpeaker] = useState<string>('');   // charId | 'player' | 'desc'
-  const [pickOpen, setPickOpen] = useState(false);
-  useEffect(() => { setSpeaker(speakChars[0]?.id ?? 'player'); setPickOpen(false); }, [sel?.id, speakChars]);
+  const [rawMsgs, setRawMsgs] = useState<RpMsg[]>([]);
+  const [loadingMsgs, setLoadingMsgs] = useState(true);
 
-  // 입장 시 읽음 처리 (N 뱃지 해제) — 브라우저에만 기록한다 (v2.0).
-  // 예전엔 방 문서의 lastRead에 써서, 방을 열어 보기만 해도 남의 방을 UPDATE 하게 되어
-  // 참여자에게는 규칙이 막았다(뱃지가 안 없어짐). 읽음 시각은 원래 사람마다 다른 값이다.
-  useEffect(() => {
-    if (!sel || !user) return;
-    rpMarkRead(sel.id, user.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel?.id, user?.id, msgRows.length]);
+  const [activeCharId, setActiveCharId] = useState<string | null>(null);
 
-  // 새 메시지 → 맨 아래로
-  const msgsRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = msgsRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [sel?.id, msgRows.length]);
-
+  const [kind, setKind] = useState<MsgKind>('player');
+  const [charId, setCharId] = useState<string | undefined>(undefined);
+  const [isSecret, setIsSecret] = useState(false);
+  const [targetCharIds, setTargetCharIds] = useState<string[]>([]);
   const [text, setText] = useState('');
-  const send = () => {
-    if (!sel || !user) return;
-    let t = text.trim();
-    if (!t) return;
-    let kind: RpMessage['kind'] = speaker === 'desc' ? 'desc' : speaker === 'player' ? 'player' : 'char';
-    if (t.startsWith('/desc ')) { kind = 'desc'; t = t.slice(6).trim(); } // /desc 명령 (v1.8)
-    if (!t) return;
-    const m: RpMessage = {
-      id: newId(), kind, charId: kind === 'char' ? speaker : undefined,
-      // 발화 당시 소유 기록 — 캐릭터가 삭제돼도 재연동 시 어느 리스트에서 고를지 판별 (v1.9)
-      charOwn: kind === 'char' ? chars.find(c => c.id === speaker)?.own : undefined,
-      authorId: user.id, text: t, date: new Date().toISOString(),
-    };
-    // 방은 건드리지 않는다 — 발화만 자기 행으로 (v2.0)
-    setMsgRows([...msgRows, { ...m, roomId: sel.id }]);
-    rpMarkRead(sel.id, user.id, m.date);
-    setText('');
-    // 알림 (4.13) — 나를 제외한 참여자에게, 방 단위로 묶어서 (디스코드 DM은 봇 연동 시)
-    memberIdsOf(sel).filter(id => id !== user.id).forEach(id =>
-      pushNotif({
-        type: 'rp', toUserId: id, href: '/rp', dedupeKey: `rp:${sel.id}`,
-        title: `역극 「${sel.title}」 새 메시지`,
-        body: t.slice(0, 60),
-      }));
+
+  const [editMsgId, setEditMsgId] = useState<string | null>(null);
+  const [editText, setEditText] = useState('');
+
+  const [diceCount, setDiceCount] = useState<number>(1);
+  const [diceSides, setDiceSides] = useState<number>(6);
+
+  const [cModal, setCModal] = useState(false);
+  const [cEditId, setCEditId] = useState<string | null>(null);
+  const [cName, setCName] = useState('');
+  const [cColor, setCColor] = useState('#3b82f6');
+  const [cAvatar, setCAvatar] = useState('');
+  const [cMemo, setCMemo] = useState('');
+  const [cOwn, setCOwn] = useState('');
+  const [cGrants, setCGrants] = useState<string[]>([]);
+
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // 캐릭터 구독
+  useEffect(() => {
+    if (!room?.id) return;
+    setLoadingChars(true);
+    const q = query(collection(db, 'rp_characters'), where('roomId', '==', room.id));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list: RpCharacter[] = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() } as RpCharacter));
+        list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        setChars(list);
+        setLoadingChars(false);
+      },
+      (err) => {
+        console.error('캐릭터 로드 에러:', err);
+        setLoadingChars(false);
+      }
+    );
+    return () => unsub();
+  }, [room?.id]);
+
+  // 메시지 구독 (클라이언트 정렬로 Firestore 복합 인덱스 요구 차단)
+  useEffect(() => {
+    if (!room?.id) return;
+    setLoadingMsgs(true);
+    const q = query(collection(db, 'rp_messages'), where('roomId', '==', room.id));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list: RpMsg[] = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() } as RpMsg));
+        list.sort((a, b) => {
+          const tA = a.createdAt?.toMillis ? a.createdAt.toMillis() : Date.now();
+          const tB = b.createdAt?.toMillis ? b.createdAt.toMillis() : Date.now();
+          return tA - tB;
+        });
+        setRawMsgs(list);
+        setLoadingMsgs(false);
+      },
+      (err) => {
+        console.error('메시지 로드 에러:', err);
+        setLoadingMsgs(false);
+      }
+    );
+    return () => unsub();
+  }, [room?.id]);
+
+  const charMap = useMemo(() => {
+    const map = new Map<string, RpCharacter>();
+    chars.forEach((c) => map.set(c.id, c));
+    return map;
+  }, [chars]);
+
+  const charGrant = (c: RpCharacter, uid: string) => {
+    if (c.own === uid) return 'own';
+    if (c.grants?.includes(uid)) return 'grant';
+    return null;
   };
 
-  // 메시지 수정(본인) — 모달
-  const [editMsg, setEditMsg] = useState<RpMessage | null>(null);
-  const [editText, setEditText] = useState('');
-  const saveMsg = () => {
-    if (!sel || !editMsg) return;
-    if (!editText.trim()) { toast('내용을 입력해 주세요'); return; }
-    const t = editText.trim();
-    if (msgRows.some(x => x.id === editMsg.id)) {
-      setMsgRows(msgRows.map(x => (x.id === editMsg.id ? { ...x, text: t } : x)));
-    } else {
-      setRooms(rooms.map(r => r.id === sel.id
-        ? { ...r, messages: r.messages.map(m => m.id === editMsg.id ? { ...m, text: t } : m) } : r));
+  const myChars = useMemo(() => {
+    return chars.filter((c) => isAdmin || c.own === user.id || c.grants?.includes(user.id));
+  }, [chars, isAdmin, user.id]);
+
+  useEffect(() => {
+    if (myChars.length > 0) {
+      if (activeCharId && !myChars.some((c) => c.id === activeCharId)) {
+        setActiveCharId(myChars[0].id);
+      }
     }
-    setEditMsg(null);
-  };
-  const removeMsg = (m: RpMessage) => {
-    if (!sel) return;
-    del.ask('이 메시지를 삭제하시겠습니까?', () => {
-      if (msgRows.some(x => x.id === m.id)) setMsgRows(msgRows.filter(x => x.id !== m.id));
-      else setRooms(rooms.map(r => r.id === sel.id
-        ? { ...r, messages: r.messages.filter(x => x.id !== m.id) } : r));
+  }, [myChars, activeCharId]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [rawMsgs.length, activeCharId]);
+
+  const sel = activeCharId;
+
+  // 탭 변경 및 권한에 따른 메시지 필터링
+  const msgsOf = (cId: string | null): RpMsg[] => {
+    return rawMsgs.filter((m) => {
+      // 선택된 캐릭터 탭 필터링 (특정 캐릭터 탭일 때는 해당 캐릭터 관련 대사/귓속말 위주)
+      if (cId && m.kind === 'char' && m.charId !== cId && !m.targetCharIds?.includes(cId)) {
+        return false;
+      }
+
+      // 비밀글/귓속말 가시성 권한 확인
+      if (m.isSecret) {
+        const isAuthorOrAdmin = m.authorId === user.id || isAdmin || room.hostId === user.id;
+        // 내가 소유/조종하는 캐릭터 목록 중 수신 타깃이 있는지 확인
+        const myCharIds = myChars.map((c) => c.id);
+        const isTargetChar = m.targetCharIds?.some((id) => myCharIds.includes(id));
+
+        if (!isAuthorOrAdmin && !isTargetChar) return false;
+      }
+      return true;
     });
   };
 
-  // 방 개설 모달
-  const [newOpen, setNewOpen] = useState(false);
-  const [nTitle, setNTitle] = useState('');
-  const [nRel, setNRel] = useState('none');
-  const [nMembers, setNMembers] = useState<string[]>([]);
-  const pool = useMembers();
-  // 개설 모달에서 보여 줄 자동 참여자 (개설자 제외) — 권한자를 이름으로 (v2.0)
-  const newRelGrantNames = (() => {
-    if (nRel === 'none') return [] as string[];
-    const ids = rpMemberIds(
-      { relId: nRel, createdBy: user?.id ?? '', memberIds: [] } as unknown as RpRoom, rels, chars);
-    return ids.filter(id => id !== user?.id)
-      .map(id => pool.find(pp => pp.id === id)?.nickname ?? id);
-  })();
-  const createRoom = () => {
-    if (!user) return;
-    if (!nTitle.trim()) { toast('방 제목을 입력해 주세요'); return; }
-    const members = Array.from(new Set([user.id, ...nMembers]));
-    const room: RpRoom = {
-      id: newId(), title: nTitle.trim(), relId: nRel === 'none' ? undefined : nRel,
-      memberIds: members, status: 'ongoing', isPublic: false,
-      createdBy: user.id, created: new Date().toISOString(), lastRead: {}, messages: [],
-    };
-    setRooms([room, ...rooms]);
-    setSelId(room.id);
-    setNewOpen(false);
-    setNTitle(''); setNRel('none'); setNMembers([]);
-  };
-
-  const canManage = sel && user && (sel.createdBy === user.id || isAdmin);
-  const [endAsk, setEndAsk] = useState(false); // 완결 확인 — 삭제가 아니므로 전용 모달
-
-  // 연결이 해제된(삭제된) 캐릭터 — 발화가 남아 있으면 다른 캐릭터로 재연동 (v1.9)
-  // own은 화면 표시 규칙과 동일하게 !!charOwn 정규화 — 기록이 없으면 왼쪽(상대) 취급 (v1.9 버그 수정:
-  // 왼쪽에 보이는 삭제 캐릭터의 RELINK 후보로 내 캐릭터 리스트가 뜨던 문제)
-  const brokenChars = useMemo(() => {
-    if (!sel) return [] as { charId: string; own: boolean }[];
-    const map = new Map<string, boolean>();
-    for (const m of msgsOf(sel)) {
-      if (m.kind === 'char' && m.charId && !chars.some(c => c.id === m.charId) && !map.has(m.charId)) {
-        map.set(m.charId, !!m.charOwn);
+  const handleSend = async () => {
+    if (!text.trim() && kind !== 'dice') return;
+    try {
+      let cObj = charId ? charMap.get(charId) : undefined;
+      if (kind === 'char' && !cObj && sel) {
+        cObj = charMap.get(sel);
       }
+
+      let payload: Partial<RpMsg> = {
+        roomId: room.id,
+        kind,
+        text: text.trim(),
+        authorId: user.id,
+        authorName: user.nickname || 'Unknown',
+        createdAt: serverTimestamp(),
+      };
+
+      if (kind === 'char') {
+        if (!cObj) {
+          antMessage.warning('대사할 캐릭터를 선택하세요.');
+          return;
+        }
+        payload.charId = cObj.id;
+        payload.charName = cObj.name;
+        payload.charColor = cObj.color || '#3b82f6';
+        payload.charAvatar = cObj.avatarUrl || DEFAULT_AVATAR;
+        payload.charOwn = cObj.own;
+      }
+
+      if (isSecret) {
+        if (targetCharIds.length === 0) {
+          antMessage.warning('귓속말을 보낼 대상 캐릭터를 선택하세요.');
+          return;
+        }
+        payload.isSecret = true;
+        payload.targetCharIds = targetCharIds;
+      }
+
+      if (kind === 'dice') {
+        const rolls: number[] = [];
+        let sum = 0;
+        for (let i = 0; i < diceCount; i++) {
+          const r = Math.floor(Math.random() * diceSides) + 1;
+          rolls.push(r);
+          sum += r;
+        }
+        payload.text = `🎲 ${diceCount}d${diceSides} 주사위 결과: [ ${rolls.join(', ')} ] = ${sum}`;
+        payload.diceDetail = JSON.stringify({ count: diceCount, sides: diceSides, rolls, sum });
+      }
+
+      await addDoc(collection(db, 'rp_messages'), payload);
+      setText('');
+      setIsSecret(false);
+      setTargetCharIds([]);
+      if (kind === 'dice') setKind('player');
+    } catch (e) {
+      console.error(e);
+      antMessage.error('메시지 전송 실패');
     }
-    return [...map.entries()].map(([charId, own]) => ({ charId, own }));
-  }, [sel, chars]);
-  const [relinkOpen, setRelinkOpen] = useState(false);
-  const [relinkSel, setRelinkSel] = useState<Record<string, string>>({});
-  // 대체 후보 — 반드시 같은 영역(own)의 캐릭터만 (v1.9 버그 수정, 사용자 발견)
-  // 자관 멤버 목록에는 내 캐릭터도 함께 들어 있어서, 상대 영역 후보에 내 캐릭터가 떴고
-  // 그걸 고르면 양쪽 대사가 한 캐릭터로 합쳐지던 문제 → 소유 구분으로 먼저 거른다.
-  const relinkCands = (own: boolean): Character[] => {
-    const sameSide = (c: Character) => !!c.own === own;
-    const relList = rel
-      ? (rel.members.map(mm => chars.find(c => c.id === mm.charId)).filter(Boolean) as Character[]).filter(sameSide)
-      : [];
-    return relList.length ? relList : chars.filter(sameSide);
-  };
-  // 이미 이 방에서 발화 중인 캐릭터 — 고르면 대사가 합쳐지므로 표시해 준다 (v1.9)
-  const speakingIds = useMemo(() => new Set(
-    (sel ? msgsOf(sel) : []).filter(m => m.kind === 'char' && m.charId).map(m => m.charId as string)), [sel, msgRows]);
-  const applyRelink = () => {
-    if (!sel) return;
-    const picked = Object.entries(relinkSel).filter(([, v]) => v);
-    if (picked.length === 0) { setRelinkOpen(false); return; }
-    const relink = <M extends RpMessage>(m: M): M => {
-      const nid = m.charId ? relinkSel[m.charId] : undefined;
-      if (!nid) return m;
-      return { ...m, charId: nid, charOwn: chars.find(c => c.id === nid)?.own };
-    };
-    setMsgRows(msgRows.map(x => (x.roomId === sel.id ? relink(x) : x)));
-    setRooms(rooms.map(r => (r.id === sel.id ? { ...r, messages: r.messages.map(relink) } : r)));
-    setRelinkOpen(false);
-    setRelinkSel({});
-    toast('캐릭터를 다시 연결했습니다');
-  };
-  const patchRoom = (p: Partial<RpRoom>) => {
-    if (!sel) return;
-    setRooms(rooms.map(r => r.id === sel.id ? { ...r, ...p } : r));
-  };
-  const removeRoom = () => {
-    if (!sel) return;
-    const count = msgsOf(sel).length;
-    del.ask(`「${sel.title}」 방을 삭제하시겠습니까?`, () => {
-      setRooms(rooms.filter(r => r.id !== sel.id));
-      setMsgRows(msgRows.filter(x => x.roomId !== sel.id));   // 딸린 발화도 함께 (v2.0)
-      setSelId(null);
-    }, `대화 ${count}개도 함께 삭제됩니다.`);
   };
 
-  // 완결 로그 HTML 내보내기 (4.9 — TRPG 백업에 붙일 수 있는 형태)
-  const exportHtml = () => {
-    if (!sel) return;
-    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>');
-    const rows = msgsOf(sel).map(m => {
-      if (m.kind === 'desc') {
-        return `<p style="text-align:center;color:#4a505a;line-height:1.8;margin:14px 0">${esc(m.text)}</p>`;
+  const handleDeleteMsg = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'rp_messages', id));
+      antMessage.success('메시지 삭제 완료');
+    } catch (e) {
+      antMessage.error('삭제 실패');
+    }
+  };
+
+  const handleUpdateMsg = async () => {
+    if (!editMsgId || !editText.trim()) return;
+    try {
+      await updateDoc(doc(db, 'rp_messages', editMsgId), {
+        text: editText.trim(),
+        updatedAt: serverTimestamp(),
+      });
+      setEditMsgId(null);
+      setEditText('');
+      antMessage.success('메시지 수정 완료');
+    } catch (e) {
+      antMessage.error('수정 실패');
+    }
+  };
+
+  const openCharModal = (c?: RpCharacter) => {
+    if (c) {
+      setCEditId(c.id);
+      setCName(c.name);
+      setCColor(c.color || '#3b82f6');
+      setCAvatar(c.avatarUrl || '');
+      setCMemo(c.memo || '');
+      setCOwn(c.own || '');
+      setCGrants(c.grants || []);
+    } else {
+      setCEditId(null);
+      setCName('');
+      setCColor('#3b82f6');
+      setCAvatar('');
+      setCMemo('');
+      setCOwn(user.id);
+      setCGrants([]);
+    }
+    setCModal(true);
+  };
+
+  const handleSaveChar = async () => {
+    if (!cName.trim()) {
+      antMessage.warning('캐릭터 이름을 입력하세요.');
+      return;
+    }
+    try {
+      const data = {
+        roomId: room.id,
+        name: cName.trim(),
+        color: cColor,
+        avatarUrl: cAvatar.trim() || DEFAULT_AVATAR,
+        memo: cMemo.trim(),
+        own: cOwn || user.id,
+        grants: cGrants,
+        updatedAt: serverTimestamp(),
+      };
+
+      if (cEditId) {
+        await updateDoc(doc(db, 'rp_characters', cEditId), data);
+      } else {
+        await addDoc(collection(db, 'rp_characters'), {
+          ...data,
+          createdAt: serverTimestamp(),
+        });
       }
-      const ch = chars.find(c => c.id === m.charId);
-      const name = m.kind === 'player' ? '플레이어' : (ch?.name ?? '');
-      const color = ch?.color ?? '#5d636d';
-      return `<div style="margin:10px 0;line-height:1.7"><b style="color:${color};letter-spacing:.05em">${esc(name)}</b> — ${esc(m.text)}</div>`;
-    }).join('\n');
-    const html = `<div style="font-family:sans-serif;max-width:720px;margin:0 auto">
-<h2 style="letter-spacing:.08em">${esc(sel.title)}</h2>
-${rows}
-</div>`;
-    const u = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-    const a = document.createElement('a');
-    a.href = u; a.download = `${sel.title}.html`;
-    a.click();
-    URL.revokeObjectURL(u);
+      setCModal(false);
+      antMessage.success('캐릭터 저장 완료');
+    } catch (e) {
+      antMessage.error('저장 실패');
+    }
   };
 
-  if (!loaded) return <section className="page" />;
-
-  if (!user) {
-    return (
-      <section className="page">
-        {/* 비로그인 안내 — 관리자가 문구 수정 가능 (v1.9), 헤더 표시 옵션에도 항상 표시 */}
-        <div className="page-head"><PageTitle>ROLEPLAY</PageTitle>
-          <EditableDesc k="rp-gate-desc" def="역극은 로그인한 참여자에게만 표시됩니다" always /></div>
-      </section>
-    );
-  }
-
-  const relName = (id?: string) => rels.find(r => r.id === id)?.name;
-  // 표시는 캐릭터 기준 (프로토타입 — "ALLOW 기반 · ALONE · WOOD") · 회원 계정은 접근 권한용일 뿐 노출 안 함
-  const relCharNames = (relId?: string) => {
-    const rel = rels.find(r => r.id === relId);
-    if (!rel) return [];
-    return rel.members
-      .map(m => chars.find(c => c.id === m.charId)?.name)
-      .filter(Boolean) as string[];
+  const handleDeleteChar = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'rp_characters', id));
+      if (activeCharId === id) setActiveCharId(null);
+      antMessage.success('캐릭터 삭제 완료');
+    } catch (e) {
+      antMessage.error('삭제 실패');
+    }
   };
-  /** 방 소제목 (v2.0 사용자 확정) — 페어면 캐릭터 이름 둘만, 다인관이면 자관명만.
-   *  「~기반」 같은 군더더기와 회원 계정 표기는 넣지 않는다 */
-  const roomLabel = (r: RpRoom) => {
-    const rel = rels.find(x => x.id === r.relId);
-    if (!rel) return '자유 개설';
-    const names = relCharNames(r.relId);
-    const isPair = rel.kind === 'pair' || rel.members.length === 2;
-    return isPair && names.length ? names.join(' · ') : rel.name;
-  };
-  const roomSub = (r: RpRoom) => [
-    roomLabel(r),
-    r.status === 'done' ? (r.isPublic ? '완결 · 공개 전환됨' : '완결') : '진행중',
-  ].join(' · ');
 
-  // 회원 계정(오너) 이름은 화면에 내지 않는다 — 계정은 접근 권한용일 뿐 (v2.0 사용자 요청).
-  // 본인 발화는 캐릭터가 아니므로 「플레이어」로 표기 (HTML 내보내기와 같은 표기)
-  const speakerLabel = speaker === 'desc' ? '지문 (DESC)' : speaker === 'player'
-    ? '플레이어' : (chars.find(c => c.id === speaker)?.name ?? '');
-  const speakerChar = chars.find(c => c.id === speaker);
+  const activeChar = sel ? charMap.get(sel) : null;
 
   return (
-    <section className={`page ${mFocus ? 'rp-focus' : ''}`}>
-      <div className="page-head">
-        <PageTitle>ROLEPLAY</PageTitle>
-        <EditableDesc k="rp-desc" def="실시간 채팅형 · 참여자에게만 존재 노출 · 캐릭터 선택 발화" />
+    <div className="rp-window-container">
+      {/* 탭 헤더 */}
+      <div className="rp-tabs">
+        <button
+          className={`rp-tab-item ${sel === null ? 'active' : ''}`}
+          onClick={() => setActiveCharId(null)}
+        >
+          <UserOutlined /> 전체 관람 / 플레이어
+        </button>
+        {myChars.map((c) => (
+          <button
+            key={c.id}
+            className={`rp-tab-item ${sel === c.id ? 'active' : ''}`}
+            onClick={() => setActiveCharId(c.id)}
+            style={{ borderBottomColor: sel === c.id ? c.color : 'transparent' }}
+          >
+            <span className="rp-tab-color" style={{ backgroundColor: c.color || '#3b82f6' }} />
+            {c.name}
+          </button>
+        ))}
+        {isAdmin && (
+          <button className="rp-tab-add" onClick={() => openCharModal()}>
+            <PlusOutlined /> 캐릭터 추가
+          </button>
+        )}
       </div>
 
-      <div className={`rp-layout ${mListOpen ? 'mopen' : ''}`}>
-        {/* 모바일 전용 접힘 바 — 탭하면 방 목록·상태 필터가 펼쳐짐 (v1.9) */}
-        <button type="button" className="rp-mfold" onClick={() => setMListOpen(o => !o)}>
-          <b>{sel ? sel.title : '방 목록'}</b>
-          <small>MY ROOMS {myRooms.length} {mListOpen ? '▴' : '▾'}</small>
-        </button>
-        {/* 방 목록 — 내 참여 방만 · 헤더 고정, 리스트만 내부 스크롤 */}
-        <div className="panel rp-rooms">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 6px 12px', flexShrink: 0 }}>
-            <b style={{ fontSize: 12, letterSpacing: '.1em', color: 'var(--sub)' }}>MY ROOMS</b>
-            <button className="btn btn-dark" style={{ padding: '0 12px', height: 30, fontSize: 11 }}
-              onClick={() => setNewOpen(true)}>＋ NEW ROOM</button>
+      {/* 액티브 캐릭터 정보 바 */}
+      {activeChar && (
+        <div className="rp-char-bar" style={{ borderLeftColor: activeChar.color || '#3b82f6' }}>
+          <img className="rp-char-avatar" src={activeChar.avatarUrl || DEFAULT_AVATAR} alt="" />
+          <div className="rp-char-info">
+            <div className="rp-char-name">
+              {activeChar.name}
+              <Tag color="blue" style={{ marginLeft: 8 }}>
+                {charGrant(activeChar, user.id) === 'own' ? '소유자' : '권한부여됨'}
+              </Tag>
+            </div>
+            {activeChar.memo && <div className="rp-char-memo">{activeChar.memo}</div>}
           </div>
-          <div className="rp-rooms-list">
-            {myRooms.map(r => (
-              <div key={r.id} className={`rp-room ${sel?.id === r.id ? 'on' : ''}`}
-                onClick={() => { setSelId(r.id); setMListOpen(false); }}>
-                <b>{r.title} {rpHasNew(r, user.id, msgsOf(r)) && sel?.id !== r.id && <span className="new">N</span>}</b>
-                <small>{roomSub(r)}</small>
-              </div>
-            ))}
-            {myRooms.length === 0 && (
-              <p className="hint" style={{ padding: '10px 6px 0' }}>
-                {fStatus === 'all' ? '참여 중인 방이 없습니다' : '이 상태의 방이 없습니다'}
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* 채팅 */}
-        <div className="panel rp-chat">
-          {sel ? (
-            <>
-              <div className="rp-head">
-                <div>
-                  <b>{sel.title}</b>
-                  <small>{roomLabel(sel)}</small>
-                </div>
-                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <span className="pill">{sel.status === 'done' ? (sel.isPublic ? '완결 · 공개' : '완결') : '진행중'}</span>
-                  {/* 삭제된 캐릭터가 남아 있으면 재연동 (v1.9) */}
-                  {canManage && brokenChars.length > 0 && (
-                    <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 10.5, color: 'var(--accent)' }}
-                      onClick={() => setRelinkOpen(true)}>RELINK</button>
-                  )}
-                  {canManage && sel.status === 'ongoing' && (
-                    <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 10.5 }}
-                      onClick={() => setEndAsk(true)}>END</button>
-                  )}
-                  {canManage && sel.status === 'done' && (
-                    <>
-                      {/* 완결 취소 — 다시 진행중으로 (공개 상태였다면 비공개로 복귀) */}
-                      <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 10.5 }}
-                        onClick={() => patchRoom({ status: 'ongoing', isPublic: false })}>REOPEN</button>
-                      {/* 공개 전환 — 참여자 전원 동의 흐름은 Supabase 연동 시 (현재는 개설자/관리자 전환) */}
-                      <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 10.5 }}
-                        onClick={() => patchRoom({ isPublic: !sel.isPublic })}>
-                        {sel.isPublic ? 'UNPUBLISH' : 'PUBLISH'}
-                      </button>
-                      <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 10.5 }}
-                        onClick={exportHtml}>EXPORT</button>
-                    </>
-                  )}
-                  {canManage && (
-                    <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 10.5 }}
-                      onClick={removeRoom}>DELETE</button>
-                  )}
-                </div>
-              </div>
-
-              <div className="rp-msgs" ref={msgsRef}>
-                {msgsOf(sel).map(m => {
-                  const mine = m.authorId === user.id;
-                  if (m.kind === 'desc') {
-                    return (
-                      <div key={m.id} className="msg-desc">
-                        {m.text}
-                        {mine && (
-                          <span className="m-act">
-                            <button onClick={() => { setEditMsg(m); setEditText(m.text); }}>EDIT</button>
-                            <button onClick={() => removeMsg(m)}>DEL</button>
-                          </span>
-                        )}
-                      </div>
-                    );
-                  }
-                  const ch = chars.find(c => c.id === m.charId);
-                  // 회원 계정 이름 대신 「플레이어」 (v2.0 사용자 요청)
-                  const name = m.kind === 'player' ? '플레이어' : (ch?.name ?? '');
-                  // 영역은 「보는 사람」 기준 (v2.0 사용자 확정): 내가 권한을 가진 캐릭터가 오른쪽,
-                  // 아닌 캐릭터가 왼쪽. 관리자에게는 자캐(own)가 자기 캐릭터다.
-                  // 그래서 같은 방이라도 사람마다 좌우가 반대로 보인다(각자 자기 쪽이 오른쪽).
-                  // 삭제된 캐릭터는 발화 당시 기록(charOwn)으로 판단.
-                  const rightSide = m.kind === 'player'
-                    ? mine
-                    : (ch ? (!!charGrant(ch, user.id) || (!!ch.own && isAdmin)) : (!!m.charOwn && isAdmin));
-                  return (
-                    <div key={m.id} className={`msg ${rightSide ? 'me' : ''}`} style={{ ['--cc' as string]: hexRgb(ch?.color) }}>
-                      <Face ch={ch} className="face" />
-                      <div>
-                        <div className="who">{name}</div>
-                        <div className="bub">{m.text}</div>
-                        <div style={{ fontSize: 9, color: 'var(--faint)', marginTop: 3 }}>{fmtHM(m.date)}</div>
-                      </div>
-                      {mine && (
-                        <span className="m-act">
-                          <button onClick={() => { setEditMsg(m); setEditText(m.text); }}>EDIT</button>
-                          <button onClick={() => removeMsg(m)}>DEL</button>
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-                {msgsOf(sel).length === 0 && (
-                  <p className="hint" style={{ textAlign: 'center', marginTop: 30 }}>첫 메시지를 남겨보세요</p>
-                )}
-              </div>
-
-              {sel.status === 'ongoing' && (
-                <div className="rp-input">
-                  {/* 발화자 선택 — 캐릭터 / 플레이어 / 지문 (v1.8) */}
-                  <div className="char-pick" onClick={() => setPickOpen(o => !o)}>
-                    {speaker === 'desc'
-                      ? <div className="f" style={{ display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--sub)' }}>❝</div>
-                      : speaker === 'player'
-                        ? <div className="f" style={{ display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--sub)' }}>◉</div>
-                        : <Face ch={speakerChar} className="f" />}
-                    <small>{speakerLabel} ▾</small>
-                    {pickOpen && (
-                      <div className="rp-pick-pop" onClick={e => e.stopPropagation()}>
-                        {speakChars.map(c => (
-                          <button key={c.id} onClick={() => { setSpeaker(c.id); setPickOpen(false); }}>
-                            <Face ch={c} className="f" />{c.name}
-                          </button>
-                        ))}
-                        <button onClick={() => { setSpeaker('player'); setPickOpen(false); }}>
-                          <span className="f" style={{ display: 'grid', placeItems: 'center', color: 'var(--sub)' }}>◉</span>
-                          플레이어
-                        </button>
-                        <button onClick={() => { setSpeaker('desc'); setPickOpen(false); }}>
-                          <span className="f" style={{ display: 'grid', placeItems: 'center', color: 'var(--sub)' }}>❝</span>
-                          지문 (DESC)
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  {/* 플레이스홀더 없음 (v1.8) · Enter 전송 / Shift+Enter 줄바꿈 · /desc 명령 지원
-                      포커스 중엔 모바일에서 역극 영역만 표시 (v1.9 — blur는 SEND 클릭이 씹히지 않게 지연) */}
-                  <KTextarea style={{ minHeight: 44 }} value={text} onChange={e => setText(e.target.value)}
-                    onFocus={() => setMFocus(true)}
-                    onBlur={() => setTimeout(() => setMFocus(false), 180)}
-                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
-                  <button className="btn btn-dark" onClick={send}>SEND</button>
-                </div>
-              )}
-            </>
-          ) : (
-            <div style={{ display: 'grid', placeItems: 'center', flex: 1 }}>
-              <p className="hint">방을 개설하면 여기에 채팅이 표시됩니다</p>
+          {isAdmin && (
+            <div className="rp-char-actions">
+              <Button icon={<EditOutlined />} size="small" onClick={() => openCharModal(activeChar)} />
+              <Button
+                icon={<DeleteOutlined />}
+                danger
+                size="small"
+                onClick={() => handleDeleteChar(activeChar.id)}
+              />
             </div>
           )}
         </div>
+      )}
 
-        {/* 우측 상태 필터 — 진행중/완결 따로 보기 */}
-        <div className="panel tagside" style={{ padding: 16, alignSelf: 'start' }}>
-          <h4>상태</h4>
-          {/* 진행중이 기본 — 진행중 / 전체 / 완결 순 (사용자 확정) */}
-          <div className={`tag ${fStatus === 'ongoing' ? 'on' : ''}`} onClick={() => setFStatus('ongoing')}>
-            진행중 <small>{cntS('ongoing')}</small>
-          </div>
-          <div className={`tag ${fStatus === 'all' ? 'on' : ''}`} onClick={() => setFStatus('all')}>
-            전체 <small>{cntS('all')}</small>
-          </div>
-          <div className={`tag ${fStatus === 'done' ? 'on' : ''}`} onClick={() => setFStatus('done')}>
-            완결 <small>{cntS('done')}</small>
-          </div>
-        </div>
+      {/* 메시지 출력 영역 */}
+      <div className="rp-msgs">
+        {loadingMsgs || loadingChars ? (
+          <div className="rp-center"><Spin /></div>
+        ) : msgsOf(sel).length === 0 ? (
+          <div className="rp-empty">메시지가 없습니다.</div>
+        ) : (
+          msgsOf(sel).map((m) => {
+            const isMine = m.authorId === user.id;
+            const isEdit = editMsgId === m.id;
+
+            return (
+              <div
+                key={m.id}
+                className={`rp-msg-row ${m.kind} ${isMine ? 'me' : 'other'} ${m.isSecret ? 'secret' : ''}`}
+              >
+                {/* 상대방 메시지 아바타 (왼쪽) */}
+                {!isMine && (
+                  <div className="rp-msg-avatar-wrap">
+                    {m.kind === 'char' ? (
+                      <img className="rp-msg-avatar" src={m.charAvatar || DEFAULT_AVATAR} alt="" />
+                    ) : (
+                      <div className="rp-msg-avatar-player"><UserOutlined /></div>
+                    )}
+                  </div>
+                )}
+
+                <div className="rp-msg-content">
+                  {/* 상단 헤더 (이름 & 비밀글 태그) */}
+                  <div className="rp-msg-header">
+                    {m.kind === 'char' ? (
+                      <span className="rp-msg-charname" style={{ color: m.charColor || '#3b82f6' }}>
+                        {m.charName} <span className="rp-msg-author">({m.authorName})</span>
+                      </span>
+                    ) : (
+                      <span className="rp-msg-author">{m.authorName}</span>
+                    )}
+
+                    {m.isSecret && (
+                      <Tag icon={<LockOutlined />} color="red" style={{ marginLeft: 6 }}>
+                        귓속말
+                      </Tag>
+                    )}
+                  </div>
+
+                  {/* 메시지 말풍선 본문 */}
+                  {isEdit ? (
+                    <div className="rp-msg-edit-box">
+                      <Input.TextArea
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        autoSize={{ minRows: 1, maxRows: 4 }}
+                      />
+                      <Space style={{ marginTop: 4 }}>
+                        <Button type="primary" size="small" onClick={handleUpdateMsg}>저장</Button>
+                        <Button size="small" onClick={() => setEditMsgId(null)}>취소</Button>
+                      </Space>
+                    </div>
+                  ) : (
+                    <div className="rp-msg-bubble">
+                      {m.kind === 'narration' ? <em>{m.text}</em> : m.text}
+                    </div>
+                  )}
+
+                  {/* 호버 액션 버튼 (수정/삭제) */}
+                  {(m.authorId === user.id || isAdmin) && !isEdit && (
+                    <div className="rp-msg-hover-actions">
+                      <Button icon={<EditOutlined />} type="text" size="small" onClick={() => { setEditMsgId(m.id); setEditText(m.text); }} />
+                      <Button icon={<DeleteOutlined />} type="text" danger size="small" onClick={() => handleDeleteMsg(m.id)} />
+                    </div>
+                  )}
+                </div>
+
+                {/* 내 메시지 아바타 (오른쪽) */}
+                {isMine && (
+                  <div className="rp-msg-avatar-wrap">
+                    {m.kind === 'char' ? (
+                      <img className="rp-msg-avatar" src={m.charAvatar || DEFAULT_AVATAR} alt="" />
+                    ) : (
+                      <div className="rp-msg-avatar-player me"><UserOutlined /></div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+        <div ref={bottomRef} />
       </div>
 
-      {/* 방 개설 — 제목 + 기반 자관(선택) + 참여 회원 (4.9) */}
-      <Modal open={newOpen} onClose={() => setNewOpen(false)} small title="역극 방 개설"
-        desc="비참여자에게는 방의 존재가 보이지 않습니다" dirty
-        actions={<>
-          <button className="btn btn-ghost" onClick={() => setNewOpen(false)}>CANCEL</button>
-          <button className="btn btn-dark" onClick={createRoom}>ADD</button>
-        </>}>
-        <div style={{ display: 'grid', gap: 11 }}>
-          <div>
-            <label className="k-label" style={{ marginBottom: 5 }}>Title</label>
-            <KInput value={nTitle} onChange={e => setNTitle(e.target.value)} />
+      {/* 입력 컨트롤 바 */}
+      <div className="rp-input-panel">
+        <div className="rp-input-options">
+          <Select
+            value={kind}
+            onChange={(v) => setKind(v)}
+            style={{ width: 110 }}
+            options={[
+              { value: 'player', label: '플레이어' },
+              { value: 'char', label: '캐릭터' },
+              { value: 'narration', label: '나레이션' },
+              { value: 'dice', label: '주사위' },
+            ]}
+          />
+
+          {kind === 'char' && (
+            <Select
+              placeholder="캐릭터 선택"
+              value={charId || sel || undefined}
+              onChange={(v) => setCharId(v)}
+              style={{ width: 140 }}
+              options={myChars.map((c) => ({ value: c.id, label: c.name }))}
+            />
+          )}
+
+          {kind === 'dice' && (
+            <Space className="rp-dice-inputs">
+              <Input
+                type="number"
+                min={1}
+                max={20}
+                value={diceCount}
+                onChange={(e) => setDiceCount(Number(e.target.value))}
+                addonAfter="개"
+                style={{ width: 90 }}
+              />
+              <span>D</span>
+              <Input
+                type="number"
+                min={2}
+                max={100}
+                value={diceSides}
+                onChange={(e) => setDiceSides(Number(e.target.value))}
+                addonAfter="면"
+                style={{ width: 90 }}
+              />
+            </Space>
+          )}
+
+          <Tooltip title="특정 캐릭터에게만 보이는 귓속말">
+            <Button
+              type={isSecret ? 'primary' : 'default'}
+              danger={isSecret}
+              icon={isSecret ? <LockOutlined /> : <UnlockOutlined />}
+              onClick={() => setIsSecret(!isSecret)}
+            >
+              귓속말
+            </Button>
+          </Tooltip>
+
+          {isSecret && (
+            <Select
+              mode="multiple"
+              placeholder="수신 캐릭터 선택"
+              value={targetCharIds}
+              onChange={(v) => setTargetCharIds(v)}
+              style={{ minWidth: 160, flex: 1 }}
+              options={chars.map((c) => ({ value: c.id, label: c.name }))}
+            />
+          )}
+        </div>
+
+        {kind !== 'dice' && (
+          <div className="rp-input-box">
+            <Input.TextArea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={
+                kind === 'narration'
+                  ? '나레이션 내용을 입력하세요...'
+                  : kind === 'char'
+                  ? '캐릭터 대사를 입력하세요...'
+                  : '플레이어 메시지를 입력하세요...'
+              }
+              autoSize={{ minRows: 1, maxRows: 4 }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+            />
+            <Button type="primary" icon={<SendOutlined />} onClick={handleSend}>
+              전송
+            </Button>
           </div>
+        )}
+
+        {kind === 'dice' && (
+          <Button type="primary" block icon={<SendOutlined />} onClick={handleSend} style={{ marginTop: 8 }}>
+            주사위 굴리기
+          </Button>
+        )}
+      </div>
+
+      {/* 캐릭터 생성/수정 모달 */}
+      <Modal
+        title={cEditId ? '캐릭터 수정' : '캐릭터 생성'}
+        open={cModal}
+        onOk={handleSaveChar}
+        onCancel={() => setCModal(false)}
+        okText="저장"
+        cancelText="취소"
+      >
+        <div className="rp-modal-form" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div>
-            <label className="k-label" style={{ marginBottom: 5 }}>기반 자관 (선택)</label>
-            <KSelect value={nRel} onChange={setNRel}
-              options={[{ value: 'none', label: '자유 개설 (자관 없음)' }, ...rels.map(r => ({ value: r.id, label: r.name }))]} />
+            <label>캐릭터 이름</label>
+            <Input value={cName} onChange={(e) => setCName(e.target.value)} placeholder="이름" />
           </div>
+
           <div>
-            <label className="k-label" style={{ marginBottom: 7 }}>참여 회원</label>
-            {nRel === 'none' ? (
-              /* 자유 개설일 때만 직접 고른다 */
-              <div style={{ display: 'grid', gap: 8 }}>
-                {pool.filter(p => p.id !== user.id).map(p => (
-                  <KCheck key={p.id} label={p.nickname}
-                    checked={nMembers.includes(p.id)}
-                    onChange={v => setNMembers(ms => v ? [...ms, p.id] : ms.filter(x => x !== p.id))} />
-                ))}
-              </div>
-            ) : (
-              /* 자관 기반이면 그 자관 캐릭터의 권한자가 자동 참여 (v2.0 사용자 확정) —
-                 나중에 권한이 다른 사람에게 넘어가도 이 방에 그대로 따라온다 */
-              <p className="hint" style={{ margin: 0 }}>
-                {newRelGrantNames.length
-                  ? `이 자관 캐릭터에 권한이 있는 회원이 자동으로 참여합니다 — ${newRelGrantNames.join(' · ')}`
-                  : '아직 이 자관 캐릭터에 권한을 준 회원이 없습니다 — 캐릭터 수정의 「회원 권한」에서 지정하면 이 방에도 자동으로 반영됩니다'}
-              </p>
-            )}
+            <label>테마 색상</label>
+            <Input type="color" value={cColor} onChange={(e) => setCColor(e.target.value)} />
+          </div>
+
+          <div>
+            <label>아바타 이미지 URL</label>
+            <Input value={cAvatar} onChange={(e) => setCAvatar(e.target.value)} placeholder="https://..." />
+          </div>
+
+          <div>
+            <label>메모 / 소개</label>
+            <Input.TextArea value={cMemo} onChange={(e) => setCMemo(e.target.value)} rows={3} />
+          </div>
+
+          <div>
+            <label>소유자 UID (기본값: 생성자)</label>
+            <Input value={cOwn} onChange={(e) => setCOwn(e.target.value)} />
+          </div>
+
+          <div>
+            <label>조종 권한 부여 (UID 컴마 구분)</label>
+            <Input
+              value={cGrants.join(', ')}
+              onChange={(e) => setCGrants(e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
+              placeholder="uid1, uid2"
+            />
           </div>
         </div>
       </Modal>
-
-      {/* 메시지 수정 (본인) */}
-      <Modal open={editMsg !== null} onClose={() => setEditMsg(null)} small title="메시지 수정" dirty
-        actions={<>
-          <button className="btn btn-ghost" onClick={() => setEditMsg(null)}>CANCEL</button>
-          <button className="btn btn-dark" onClick={saveMsg}>SAVE</button>
-        </>}>
-        <KTextarea style={{ minHeight: 100 }} value={editText} onChange={e => setEditText(e.target.value)} />
-      </Modal>
-      {/* 캐릭터 다시 연결 — 삭제된 캐릭터의 발화를 다른 캐릭터로 (v1.9) */}
-      <Modal open={relinkOpen} onClose={() => setRelinkOpen(false)} small title="캐릭터 다시 연결"
-        desc="연결이 해제된 캐릭터의 발화를 다른 캐릭터로 옮깁니다 — 같은 영역(왼쪽/오른쪽)의 캐릭터만 선택할 수 있습니다" dirty
-        actions={<>
-          <button className="btn btn-ghost" onClick={() => setRelinkOpen(false)}>CANCEL</button>
-          <button className="btn btn-dark" onClick={applyRelink}>APPLY</button>
-        </>}>
-        <div style={{ display: 'grid', gap: 12 }}>
-          {brokenChars.map(b => (
-            <div key={b.charId}>
-              <label className="k-label" style={{ marginBottom: 5 }}>
-                삭제된 캐릭터 — {b.own ? '내 캐릭터 영역 (내 캐릭터만 선택 가능)' : '상대 영역 (상대 캐릭터만 선택 가능)'}
-              </label>
-              <KSelect value={relinkSel[b.charId] ?? ''} onChange={v => setRelinkSel(s => ({ ...s, [b.charId]: v }))}
-                options={[
-                  { value: '', label: '선택 안 함' },
-                  // 이미 발화 중인 캐릭터를 고르면 대사가 합쳐지므로 표시 (v1.9 사용자 피드백)
-                  ...relinkCands(b.own).map(c => ({
-                    value: c.id,
-                    label: speakingIds.has(c.id) ? `${c.name} — 이미 발화 중 (대사가 합쳐집니다)` : c.name,
-                  })),
-                ]} />
-            </div>
-          ))}
-        </div>
-      </Modal>
-
-      {/* 완결 확인 (삭제 아님 — END/CANCEL) */}
-      <ConfirmModal open={endAsk} title="역극을 완결 처리하시겠습니까?"
-        body="완결 후에는 공개 전환과 로그 내보내기를 사용할 수 있습니다."
-        onClose={() => setEndAsk(false)}
-        buttons={[
-          { label: 'END', kind: 'dark', onClick: () => { patchRoom({ status: 'done' }); setEndAsk(false); } },
-          { label: 'CANCEL', kind: 'ghost', onClick: () => setEndAsk(false) },
-        ]} />
-      {del.element}
-    </section>
+    </div>
   );
-}
+};
