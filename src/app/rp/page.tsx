@@ -437,7 +437,7 @@ ${rows}
                   const name = m.kind === 'player' ? '플레이어' : (ch?.name ?? '');
                   const rightSide = m.kind === 'player'
                     ? mine
-                    : (ch ? (!!charGrant(ch, user.id) || (!!ch.own && isAdmin)) : (!!m.charOwn && isAdmin));
+                      : (ch ? !!charGrant(ch, user.id) : mine);
                   return (
                     <div key={m.id} className={`msg ${rightSide ? 'me' : ''}`} style={{ ['--cc' as string]: hexRgb(ch?.color) }}>
                       <Face ch={ch} className="face" />
