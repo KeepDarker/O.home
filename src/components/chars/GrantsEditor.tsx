@@ -1,6 +1,5 @@
 'use client';
-// 회원-캐릭터 권한 편집 (3차, v1.9) — 상대 캐릭터에 회원별 권한 부여:
-// 역극 플레이(그 캐릭터로 발화 가능) / 편집까지(캐릭터 편집 포함).
+// 회원-캐릭터 권한 편집 (3차, v1.9)
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { CharGrant } from '@/lib/charStore';
@@ -15,7 +14,7 @@ export function GrantsEditor({ value = [], onChange }: {
   onChange: (next: CharGrant[]) => void;
 }) {
   const members = useMembers() || [];
-  const pool = members.filter(p => p.id !== 'admin'); // 관리자는 항상 전권
+  const pool = members.filter(p => p.id !== 'admin');
   const del = useConfirmDelete();
   const [q, setQ] = useState('');
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -32,10 +31,7 @@ export function GrantsEditor({ value = [], onChange }: {
     });
   }, []);
 
-  const openAt = () => {
-    updatePos();
-  };
-
+  const openAt = () => { updatePos(); };
   const open = pos !== null;
   const setOpen = (v: boolean) => (v ? openAt() : setPos(null));
 
@@ -67,15 +63,11 @@ export function GrantsEditor({ value = [], onChange }: {
 
   return (
     <div style={{ display: 'grid', gap: 9 }}>
-      {/* 회원 검색 */}
       <div ref={wrapRef} style={{ position: 'relative' }}>
         <KInput
           placeholder="닉네임·아이디 검색"
           value={q}
-          onChange={e => {
-            setQ(e.target.value);
-            setOpen(true);
-          }}
+          onChange={e => { setQ(e.target.value); setOpen(true); }}
           onFocus={() => setOpen(true)}
           onBlur={() => setTimeout(() => setOpen(false), 200)}
         />
@@ -102,7 +94,7 @@ export function GrantsEditor({ value = [], onChange }: {
                 type="button"
                 style={{
                   display: 'flex',
-                  justify: 'space-between',
+                  justifyContent: 'space-between',
                   width: '100%',
                   textAlign: 'left',
                   padding: '7px 10px',
@@ -129,7 +121,6 @@ export function GrantsEditor({ value = [], onChange }: {
         )}
       </div>
 
-      {/* 권한 부여된 회원 목록 */}
       {granted.map(g => (
         <div key={g.userId} style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between' }}>
           <span style={{ fontSize: 12.5 }}>
