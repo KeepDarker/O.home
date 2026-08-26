@@ -78,7 +78,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
   const [cName, setCName] = useState('');
   const [cColor, setCColor] = useState('#3b82f6');
   const [cAvatar, setCAvatar] = useState('');
-  const [cMemo, CSetMemo] = useState('');
+  const [cMemo, setCMemo] = useState('');
   const [cOwn, setCOwn] = useState('');
   const [cGrants, setCGrants] = useState<string[]>([]);
 
@@ -89,37 +89,46 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
     if (!room?.id) return;
     setLoadingChars(true);
     const q = query(collection(db, 'rp_characters'), where('roomId', '==', room.id));
-    const unsub = onSnapshot(q, (snap) => {
-      const list: RpCharacter[] = [];
-      snap.forEach((d) => list.push({ id: d.id, ...d.data() } as RpCharacter));
-      list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      setChars(list);
-      setLoadingChars(false);
-    }, (err) => {
-      console.error(err);
-      setLoadingChars(false);
-    });
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list: RpCharacter[] = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() } as RpCharacter));
+        list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        setChars(list);
+        setLoadingChars(false);
+      },
+      (err) => {
+        console.error('캐릭터 로드 에러:', err);
+        setLoadingChars(false);
+      }
+    );
     return () => unsub();
   }, [room?.id]);
 
-  // 메세지 구독
+  // 메시지 구독 (클라이언트 정렬로 Firestore 복합 인덱스 요구 차단)
   useEffect(() => {
     if (!room?.id) return;
     setLoadingMsgs(true);
-    const q = query(
-      collection(db, 'rp_messages'),
-      where('roomId', '==', room.id),
-      orderBy('createdAt', 'asc')
+    const q = query(collection(db, 'rp_messages'), where('roomId', '==', room.id));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list: RpMsg[] = [];
+        snap.forEach((d) => list.push({ id: d.id, ...d.data() } as RpMsg));
+        list.sort((a, b) => {
+          const tA = a.createdAt?.toMillis ? a.createdAt.toMillis() : Date.now();
+          const tB = b.createdAt?.toMillis ? b.createdAt.toMillis() : Date.now();
+          return tA - tB;
+        });
+        setRawMsgs(list);
+        setLoadingMsgs(false);
+      },
+      (err) => {
+        console.error('메시지 로드 에러:', err);
+        setLoadingMsgs(false);
+      }
     );
-    const unsub = onSnapshot(q, (snap) => {
-      const list: RpMsg[] = [];
-      snap.forEach((d) => list.push({ id: d.id, ...d.data() } as RpMsg));
-      setRawMsgs(list);
-      setLoadingMsgs(false);
-    }, (err) => {
-      console.error(err);
-      setLoadingMsgs(false);
-    });
     return () => unsub();
   }, [room?.id]);
 
@@ -141,11 +150,9 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
 
   useEffect(() => {
     if (myChars.length > 0) {
-      if (!activeCharId || !myChars.some((c) => c.id === activeCharId)) {
+      if (activeCharId && !myChars.some((c) => c.id === activeCharId)) {
         setActiveCharId(myChars[0].id);
       }
-    } else {
-      setActiveCharId(null);
     }
   }, [myChars, activeCharId]);
 
@@ -155,12 +162,22 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
 
   const sel = activeCharId;
 
+  // 탭 변경 및 권한에 따른 메시지 필터링
   const msgsOf = (cId: string | null): RpMsg[] => {
     return rawMsgs.filter((m) => {
+      // 선택된 캐릭터 탭 필터링 (특정 캐릭터 탭일 때는 해당 캐릭터 관련 대사/귓속말 위주)
+      if (cId && m.kind === 'char' && m.charId !== cId && !m.targetCharIds?.includes(cId)) {
+        return false;
+      }
+
+      // 비밀글/귓속말 가시성 권한 확인
       if (m.isSecret) {
-        const isAuth = m.authorId === user.id || isAdmin;
-        const targetMatch = cId ? m.targetCharIds?.includes(cId) : false;
-        if (!isAuth && !targetMatch) return false;
+        const isAuthorOrAdmin = m.authorId === user.id || isAdmin || room.hostId === user.id;
+        // 내가 소유/조종하는 캐릭터 목록 중 수신 타깃이 있는지 확인
+        const myCharIds = myChars.map((c) => c.id);
+        const isTargetChar = m.targetCharIds?.some((id) => myCharIds.includes(id));
+
+        if (!isAuthorOrAdmin && !isTargetChar) return false;
       }
       return true;
     });
@@ -196,6 +213,10 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
       }
 
       if (isSecret) {
+        if (targetCharIds.length === 0) {
+          antMessage.warning('귓속말을 보낼 대상 캐릭터를 선택하세요.');
+          return;
+        }
         payload.isSecret = true;
         payload.targetCharIds = targetCharIds;
       }
@@ -214,6 +235,8 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
 
       await addDoc(collection(db, 'rp_messages'), payload);
       setText('');
+      setIsSecret(false);
+      setTargetCharIds([]);
       if (kind === 'dice') setKind('player');
     } catch (e) {
       console.error(e);
@@ -224,20 +247,22 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
   const handleDeleteMsg = async (id: string) => {
     try {
       await deleteDoc(doc(db, 'rp_messages', id));
+      antMessage.success('메시지 삭제 완료');
     } catch (e) {
       antMessage.error('삭제 실패');
     }
   };
 
   const handleUpdateMsg = async () => {
-    if (!editMsgId) return;
+    if (!editMsgId || !editText.trim()) return;
     try {
       await updateDoc(doc(db, 'rp_messages', editMsgId), {
-        text: editText,
+        text: editText.trim(),
         updatedAt: serverTimestamp(),
       });
       setEditMsgId(null);
       setEditText('');
+      antMessage.success('메시지 수정 완료');
     } catch (e) {
       antMessage.error('수정 실패');
     }
@@ -249,7 +274,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
       setCName(c.name);
       setCColor(c.color || '#3b82f6');
       setCAvatar(c.avatarUrl || '');
-      CSetMemo(c.memo || '');
+      setCMemo(c.memo || '');
       setCOwn(c.own || '');
       setCGrants(c.grants || []);
     } else {
@@ -257,7 +282,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
       setCName('');
       setCColor('#3b82f6');
       setCAvatar('');
-      CSetMemo('');
+      setCMemo('');
       setCOwn(user.id);
       setCGrants([]);
     }
@@ -276,7 +301,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         color: cColor,
         avatarUrl: cAvatar.trim() || DEFAULT_AVATAR,
         memo: cMemo.trim(),
-        own: cOwn,
+        own: cOwn || user.id,
         grants: cGrants,
         updatedAt: serverTimestamp(),
       };
@@ -365,13 +390,12 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
 
       {/* 메시지 출력 영역 */}
       <div className="rp-msgs">
-        {loadingMsgs ? (
+        {loadingMsgs || loadingChars ? (
           <div className="rp-center"><Spin /></div>
         ) : msgsOf(sel).length === 0 ? (
           <div className="rp-empty">메시지가 없습니다.</div>
         ) : (
           msgsOf(sel).map((m) => {
-            // 내가 쓴 메시지인지 판단
             const isMine = m.authorId === user.id;
             const isEdit = editMsgId === m.id;
 
@@ -540,7 +564,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
               }
               autoSize={{ minRows: 1, maxRows: 4 }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   handleSend();
                 }
@@ -568,28 +592,40 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
         okText="저장"
         cancelText="취소"
       >
-        <div className="rp-modal-form">
-          <label>캐릭터 이름</label>
-          <Input value={cName} onChange={(e) => setCName(e.target.value)} placeholder="이름" />
+        <div className="rp-modal-form" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <label>캐릭터 이름</label>
+            <Input value={cName} onChange={(e) => setCName(e.target.value)} placeholder="이름" />
+          </div>
 
-          <label>테마 색상</label>
-          <Input type="color" value={cColor} onChange={(e) => setCColor(e.target.value)} />
+          <div>
+            <label>테마 색상</label>
+            <Input type="color" value={cColor} onChange={(e) => setCColor(e.target.value)} />
+          </div>
 
-          <label>아바타 이미지 URL</label>
-          <Input value={cAvatar} onChange={(e) => setCAvatar(e.target.value)} placeholder="https://..." />
+          <div>
+            <label>아바타 이미지 URL</label>
+            <Input value={cAvatar} onChange={(e) => setCAvatar(e.target.value)} placeholder="https://..." />
+          </div>
 
-          <label>메모 / 소개</label>
-          <Input.TextArea value={cMemo} onChange={(e) => CSetMemo(e.target.value)} rows={3} />
+          <div>
+            <label>메모 / 소개</label>
+            <Input.TextArea value={cMemo} onChange={(e) => setCMemo(e.target.value)} rows={3} />
+          </div>
 
-          <label>소유자 UID (기본값: 생성자)</label>
-          <Input value={cOwn} onChange={(e) => setCOwn(e.target.value)} />
+          <div>
+            <label>소유자 UID (기본값: 생성자)</label>
+            <Input value={cOwn} onChange={(e) => setCOwn(e.target.value)} />
+          </div>
 
-          <label>조종 권한 부여 (UID 컴마 구분)</label>
-          <Input
-            value={cGrants.join(',')}
-            onChange={(e) => setCGrants(e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-            placeholder="uid1, uid2"
-          />
+          <div>
+            <label>조종 권한 부여 (UID 컴마 구분)</label>
+            <Input
+              value={cGrants.join(', ')}
+              onChange={(e) => setCGrants(e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
+              placeholder="uid1, uid2"
+            />
+          </div>
         </div>
       </Modal>
     </div>
