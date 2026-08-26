@@ -299,17 +299,7 @@ export function CharEditForm({ initial, onSave, onCancel, auMode, existingIds }:
                 value: f.id,
                 label: <span style={{ fontFamily: f.family }}>{f.name}</span>,
               }))} />
-
-            {!auMode && (
-  <KSelect value={visibility} onChange={v => setVisibility(v as Visibility)}
-    options={[
-      { value: 'public', label: '전체공개' },
-      { value: 'member', label: '멤버공개' },
-      { value: 'private', label: '나만보기' },
-    ]} />
-)}
-
-{/* 조건문 없이 무조건 노출되도록 배치 */}
+            {/* 조건문 없이 무조건 노출되도록 배치 */}
 <div style={{ marginTop: 12 }}>
   <label className="k-label" style={{ margin: '0 0 6px' }}>회원 권한 — 역극 플레이 · 캐릭터 편집</label>
   <GrantsEditor value={grants} onChange={setGrants} />
