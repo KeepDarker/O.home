@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Input, Modal, Select, Spin, Tag, Tooltip, message as antMessage, Space } from 'antd';
 import {
-  SettingOutlined, UserOutlined, MessageOutlined, PlusOutlined, DeleteOutlined, EditOutlined,
-  SendOutlined, CloseOutlined, ToolOutlined, LockOutlined, UnlockOutlined, EyeOutlined, CheckOutlined
+  UserOutlined, PlusOutlined, DeleteOutlined, EditOutlined,
+  SendOutlined, LockOutlined, UnlockOutlined
 } from '@ant-design/icons';
 import {
-  addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc,
-  where, deleteDoc, getDocs, limit, arrayUnion, arrayRemove
+  addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc,
+  where, deleteDoc
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import './RpWindow.css';
@@ -371,20 +371,17 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
           <div className="rp-empty">메시지가 없습니다.</div>
         ) : (
           msgsOf(sel).map((m) => {
-            const ch = m.charId ? charMap.get(m.charId) : null;
-            
-            // ★ 수정된 핵심 로직: 캐릭터 소유권/권한과 상관없이 "내가 작성한 메시지"만 오른쪽에 배치
-            const rightSide = m.authorId === user.id;
-
+            // 내가 쓴 메시지인지 판단
+            const isMine = m.authorId === user.id;
             const isEdit = editMsgId === m.id;
 
             return (
               <div
                 key={m.id}
-                className={`rp-msg-row ${m.kind} ${rightSide ? 'me' : 'other'} ${m.isSecret ? 'secret' : ''}`}
+                className={`rp-msg-row ${m.kind} ${isMine ? 'me' : 'other'} ${m.isSecret ? 'secret' : ''}`}
               >
-                {/* 왼쪽 프로필 (상대방 메시지일 때) */}
-                {!rightSide && (
+                {/* 상대방 메시지 아바타 (왼쪽) */}
+                {!isMine && (
                   <div className="rp-msg-avatar-wrap">
                     {m.kind === 'char' ? (
                       <img className="rp-msg-avatar" src={m.charAvatar || DEFAULT_AVATAR} alt="" />
@@ -395,7 +392,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                 )}
 
                 <div className="rp-msg-content">
-                  {/* 상단 이름 영역 */}
+                  {/* 상단 헤더 (이름 & 비밀글 태그) */}
                   <div className="rp-msg-header">
                     {m.kind === 'char' ? (
                       <span className="rp-msg-charname" style={{ color: m.charColor || '#3b82f6' }}>
@@ -412,7 +409,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                     )}
                   </div>
 
-                  {/* 메시지 본문 */}
+                  {/* 메시지 말풍선 본문 */}
                   {isEdit ? (
                     <div className="rp-msg-edit-box">
                       <Input.TextArea
@@ -431,7 +428,7 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                     </div>
                   )}
 
-                  {/* 호버 액션 버턴 */}
+                  {/* 호버 액션 버튼 (수정/삭제) */}
                   {(m.authorId === user.id || isAdmin) && !isEdit && (
                     <div className="rp-msg-hover-actions">
                       <Button icon={<EditOutlined />} type="text" size="small" onClick={() => { setEditMsgId(m.id); setEditText(m.text); }} />
@@ -440,8 +437,8 @@ export const RpWindow: React.FC<RpWindowProps> = ({ room, user, isAdmin }) => {
                   )}
                 </div>
 
-                {/* 오른쪽 프로필 (내 메시지일 때) */}
-                {rightSide && (
+                {/* 내 메시지 아바타 (오른쪽) */}
+                {isMine && (
                   <div className="rp-msg-avatar-wrap">
                     {m.kind === 'char' ? (
                       <img className="rp-msg-avatar" src={m.charAvatar || DEFAULT_AVATAR} alt="" />
