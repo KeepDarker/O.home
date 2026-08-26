@@ -384,3 +384,8 @@ function FirstArtCrop({ open, item, crop, onClose, onApply }: {
   return <CropEditor open={open} src={src} aspect="3:4" initial={crop} onClose={onClose} onApply={onApply} />;
 }
 
+{/* 탭 추가 버튼 바로 아래에 넣기 */}
+<label className="k-label" style={{ margin: '12px 0 0' }}>
+  회원 권한 — 역극 플레이 · 캐릭터 편집
+</label>
+<GrantsEditor value={grants} onChange={setGrants} />
