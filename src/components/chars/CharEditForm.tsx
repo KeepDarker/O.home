@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 // 캐릭터 등록/프로필 편집 — 전용 페이지 폼 (4.4)
 // 모달이 아니라 페이지라 잘못 클릭해도 닫히지 않음. 탭 내용은 별도 편집 화면으로 전환해 작성.
 // 아트는 여러 장 — 첫 장이 대표 풀 아트이자 리스트 썸네일(3:4 크롭) 원본 (6.1)
@@ -32,24 +32,24 @@ function ArtThumb({ item, crop }: { item: ArtItem; crop?: CropValue }) {
 }
 
 export function CharEditForm({ initial, onSave, onCancel, auMode, existingIds }: {
-  initial: Character | null;               // null = 신규 등록
+  initial: Character | null;                // null = 신규 등록
   onSave: (c: Character) => void;
   onCancel: () => void;
-  auMode?: boolean;                        // AU 전용 편집 (v1.9) — 공개범위·회원권한은 base 소관이라 숨김
-  existingIds?: string[];                  // 페이지 주소 중복 검사용 (v1.9 — 신규 등록)
+  auMode?: boolean;                         // AU 전용 편집 (v1.9) — 공개범위·회원권한은 base 소관이라 숨김
+  existingIds?: string[];                   // 페이지 주소 중복 검사용 (v1.9 — 신규 등록)
 }) {
   const { fonts, familyOf } = useFonts();
   const toast = useToast();
   const isNew = !initial;
 
   const [name, setName] = useState(initial?.name ?? '');
-  const [slug, setSlug] = useState('');   // 페이지 주소 /chars/{slug} (v1.9 — 신규 등록, 비우면 자동)
+  const [slug, setSlug] = useState('');    // 페이지 주소 /chars/{slug} (v1.9 — 신규 등록, 비우면 자동)
   const [sub, setSub] = useState(initial?.sub ?? '');
   const [color, setColor] = useState(initial?.color ?? '#5d636d');
   const [themeMode, setThemeMode] = useState<'default' | 'custom'>(initial?.themeMode ?? 'default');
   const [visibility, setVisibility] = useState<Visibility>(initial?.visibility ?? 'public');
   const [fontId, setFontId] = useState(initial?.fontId ?? 'serif');
-  const [nameSize, setNameSize] = useState(initial?.nameSize ?? 38);   // 상세 큰 이름 크기 (v2.0)
+  const [nameSize, setNameSize] = useState(initial?.nameSize ?? 38);    // 상세 큰 이름 크기 (v2.0)
   const [bodyFontId, setBodyFontId] = useState(initial?.bodyFontId ?? 'default');
   const [specs, setSpecs] = useState<SpecRow[]>(
     (initial?.specs ?? [{ label: '성별', value: '' }, { label: '키', value: '' }]).map(s => ({ ...s, id: newId() })));
@@ -64,7 +64,7 @@ export function CharEditForm({ initial, onSave, onCancel, auMode, existingIds }:
   const [thumbCrop, setThumbCrop] = useState<CropValue | undefined>(initial?.thumbCrop);
   const [grants, setGrants] = useState<CharGrant[]>(initial?.grants ?? []); // 상대 캐릭터 회원 권한 (v1.9)
   const [cropOpen, setCropOpen] = useState(false);
-  const [lb, setLb] = useState<number | null>(null);   // 아트 썸네일 클릭 → 원본 보기
+  const [lb, setLb] = useState<number | null>(null);    // 아트 썸네일 클릭 → 원본 보기
   // 화면 전환: 메인 폼 / 탭 전용 편집 화면
   const [view, setView] = useState<'main' | string>('main');
 
@@ -95,7 +95,7 @@ export function CharEditForm({ initial, onSave, onCancel, auMode, existingIds }:
       colors: colors.filter(x => x.hex).map(({ hex, label }) => ({ hex, label })),
       colorTipMode,
       specs: specs.filter(s => s.label.trim()).map(({ label, value }) => ({ label: label.trim(), value })),
-      tabs,   // 제목이 비어도 유지 — 필터로 사라지던 버그 수정 (v1.9 사용자 지적)
+      tabs,    // 제목이 비어도 유지 — 필터로 사라지던 버그 수정 (v1.9 사용자 지적)
       basicHtml,
       visibility,
       fontId,
@@ -103,7 +103,7 @@ export function CharEditForm({ initial, onSave, onCancel, auMode, existingIds }:
       bodyFontId,
       thumbClass: initial?.thumbClass ?? '',
       arts: artIds,
-      thumbId: artIds[0],       // 썸네일 = 첫 아트 + 크롭
+      thumbId: artIds[0],        // 썸네일 = 첫 아트 + 크롭
       thumbCrop,
       artId: artIds[0],
       own: initial?.own ?? true,
@@ -134,7 +134,7 @@ export function CharEditForm({ initial, onSave, onCancel, auMode, existingIds }:
         onDelete={() => askDeleteTab(curTab.id, () => setView('main'))}
         onBack={() => setView('main')} />
       {del.element}
-    </>;
+    < me;
   }
 
   /* ---------- 메인 폼 ---------- */
@@ -247,7 +247,7 @@ export function CharEditForm({ initial, onSave, onCancel, auMode, existingIds }:
           }}>＋ ADD TAB</button>
 
         {/* 상대 캐릭터 회원 권한 — 역극 플레이 / 편집까지 (3차 회원-캐릭터 연결, v1.9) — AU 편집에선 base 소관 */}
-        {!auMode && initial?.own === false && (
+        {!auMode && (
           <>
             <label className="k-label" style={{ margin: '6px 0 0' }}>회원 권한 — 역극 플레이 · 캐릭터 편집</label>
             <GrantsEditor value={grants} onChange={setGrants} />
@@ -383,4 +383,3 @@ function FirstArtCrop({ open, item, crop, onClose, onApply }: {
   if (!src || !open) return null;
   return <CropEditor open={open} src={src} aspect="3:4" initial={crop} onClose={onClose} onApply={onApply} />;
 }
-
