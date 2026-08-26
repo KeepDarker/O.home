@@ -40,7 +40,7 @@ export default function CharsPage() {
           {isAdmin && <button className="btn btn-dark" onClick={() => router.push('/chars/new')}>＋ ADD CHARACTER</button>}
         </div>
       </div>
-      <div className="g5 chars-grid">
+      <div className="g6 chars-grid">
         {visible.map((c, i) => {
           const priv = c.visibility === 'private';
           const sp = sort(i) as { style?: React.CSSProperties };
